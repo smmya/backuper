@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_URL="${BACKUPER_REPO_URL:-https://github.com/YOUR_GITHUB_USERNAME/backuper.git}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="${BACKUPER_REPO_URL:-}"
 BRANCH="${BACKUPER_BRANCH:-main}"
 INSTALL_BASE_DIR="${BACKUPER_BASE_DIR:-$(pwd)}"
 INSTALL_DIR="${BACKUPER_INSTALL_DIR:-$INSTALL_BASE_DIR/backuper}"
@@ -68,7 +69,17 @@ if sys.version_info < (3, 10):
 PY
 }
 
-fetch_source() {
+resolve_source() {
+  if [ -d "$SCRIPT_DIR/backuper" ] && [ -f "$SCRIPT_DIR/server" ] && [ -f "$SCRIPT_DIR/client" ]; then
+    log "使用脚本同目录程序: $SCRIPT_DIR"
+    printf '%s\n' "$SCRIPT_DIR"
+    return
+  fi
+
+  if [ -z "$REPO_URL" ]; then
+    die "未在脚本同目录找到程序文件，请在仓库目录执行该脚本，或设置 BACKUPER_REPO_URL"
+  fi
+
   local tmpdir
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
@@ -81,6 +92,16 @@ install_files() {
   local src="$1"
   log "安装到 $INSTALL_DIR"
   mkdir -p "$INSTALL_DIR"
+
+  local src_real install_real
+  src_real="$(cd "$src" && pwd)"
+  install_real="$(cd "$INSTALL_DIR" && pwd)"
+  if [ "$src_real" = "$install_real" ]; then
+    die "源码目录和安装目录相同。请在上级目录执行脚本，或设置 BACKUPER_INSTALL_DIR。"
+  fi
+  case "$install_real/" in
+    "$src_real/"*) die "安装目录不能位于源码目录内部: $install_real" ;;
+  esac
 
   rm -rf "$INSTALL_DIR/backuper"
   cp -a "$src/backuper" "$INSTALL_DIR/backuper"
@@ -162,13 +183,10 @@ EOF
 main() {
   need_root
   validate_install_dir
-  if printf '%s' "$REPO_URL" | grep -q 'YOUR_GITHUB_USERNAME'; then
-    die "请先设置 BACKUPER_REPO_URL，例如: sudo BACKUPER_REPO_URL=https://github.com/yourname/backuper.git bash install-server.sh"
-  fi
   install_packages
   check_python
   local src
-  src="$(fetch_source)"
+  src="$(resolve_source)"
   install_files "$src"
   "$INSTALL_DIR/server" init
   write_launchers
