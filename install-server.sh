@@ -38,10 +38,12 @@ choose_action() {
 
 Backuper 一键脚本
 ================
-1. 安装/更新程序
-2. 安装/更新程序并启动服务端
-3. 卸载程序，保留配置和备份数据
-4. 卸载程序，并删除配置和备份数据
+1. 安装程序
+2. 安装程序并启动服务端
+3. 更新程序
+4. 更新程序并重启服务端
+5. 卸载程序，保留配置和备份数据
+6. 卸载程序，并删除配置和备份数据
 0. 退出
 
 EOF
@@ -52,8 +54,10 @@ EOF
   case "$choice" in
     1) MODE="install"; AUTO_START="0" ;;
     2) MODE="install"; AUTO_START="1" ;;
-    3) MODE="uninstall"; REMOVE_DATA="0" ;;
-    4) MODE="uninstall"; REMOVE_DATA="1" ;;
+    3) MODE="update"; AUTO_START="0" ;;
+    4) MODE="update"; AUTO_START="1" ;;
+    5) MODE="uninstall"; REMOVE_DATA="0" ;;
+    6) MODE="uninstall"; REMOVE_DATA="1" ;;
     0) exit 0 ;;
     *) die "无效选择: $choice" ;;
   esac
@@ -109,6 +113,10 @@ detect_install_dir() {
       return
     fi
   done
+
+  if [ "$MODE" = "update" ]; then
+    die "未检测到已有安装目录，请先选择安装程序"
+  fi
 
   if [ "$MODE" = "uninstall" ]; then
     die "未检测到已有安装目录；请先确认 /etc/backuper/install.conf、systemd 服务或快捷命令是否存在"
@@ -314,12 +322,28 @@ EOF
 }
 
 print_done() {
+  local title next_action service_action
+  if [ "$MODE" = "update" ]; then
+    title="更新完成"
+    next_action="运行 ./server 检查配置"
+  else
+    title="安装完成"
+    next_action="进入“基础设置”确认 HTTP / HTTPS 监听端口"
+  fi
+  if [ "$AUTO_START" = "1" ]; then
+    service_action="后台服务已启动/重启"
+  else
+    service_action="未启动后台服务"
+  fi
   cat <<EOF
 
-[Backuper] 安装完成
+[Backuper] $title
 
 安装目录:
   $INSTALL_DIR
+
+服务状态:
+  $service_action
 
 常用命令:
   cd $INSTALL_DIR && ./server
@@ -330,7 +354,7 @@ print_done() {
 
 下一步:
   1. 执行: cd $INSTALL_DIR && ./server
-  2. 进入“基础设置”确认 HTTP / HTTPS 监听端口
+  2. $next_action
   3. 进入“账号管理”创建账号并生成客户端配置码
 
 EOF
