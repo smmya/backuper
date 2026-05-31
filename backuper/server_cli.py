@@ -52,6 +52,7 @@ def default_config() -> dict:
         "allow_download": False,
         "require_program_access": True,
         "program_access_token": "",
+        "cert_hosts": [],
         "users": {},
         "cloud_sync": cloud_defaults(),
     }
@@ -126,11 +127,39 @@ def _san_for_host(host: str) -> str:
         return f"DNS:{host}"
 
 
+def normalize_host(value: str) -> str:
+    return value.strip().strip("[]")
+
+
+def cert_hosts(cfg: dict, extra: str | None = None) -> list[str]:
+    hosts: list[str] = ["localhost", "127.0.0.1"]
+    for item in cfg.get("cert_hosts", []):
+        host = normalize_host(str(item))
+        if host and host not in hosts:
+            hosts.append(host)
+    if extra:
+        host = normalize_host(extra)
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def add_cert_host(cfg: dict, host: str) -> bool:
+    host = normalize_host(host)
+    if not host or host in ("localhost", "127.0.0.1"):
+        return False
+    items = [normalize_host(str(item)) for item in cfg.get("cert_hosts", [])]
+    items = [item for item in items if item and item not in ("localhost", "127.0.0.1")]
+    if host in items:
+        return False
+    items.append(host)
+    cfg["cert_hosts"] = items
+    return True
+
+
 def ensure_self_signed_cert(host: str | None = None) -> bool:
     cert, key = cert_paths()
-    requested_hosts = ["localhost", "127.0.0.1"]
-    if host and host not in requested_hosts:
-        requested_hosts.append(host)
+    requested_hosts = cert_hosts(load_config(), host)
     meta = read_json(cert_meta_path(), {})
     existing_hosts = set(meta.get("hosts", []))
     if cert.exists() and key.exists() and set(requested_hosts).issubset(existing_hosts):
@@ -167,10 +196,16 @@ def ensure_self_signed_cert(host: str | None = None) -> bool:
 
 def init_server() -> None:
     cfg = ensure_initialized()
-    ok = ensure_self_signed_cert("localhost")
+    host, source = detect_connect_host()
+    changed = add_cert_host(cfg, host)
+    if changed:
+        save_config(cfg)
+    ok = ensure_self_signed_cert()
     print("初始化完成。")
     print(f"配置文件: {SERVER_CONFIG}")
     print(f"数据根目录: {cfg['storage_root']}")
+    print(f"证书地址: {', '.join(cert_hosts(cfg))}")
+    print(f"自动检测地址: {host} ({source})")
     print("HTTPS 自签证书: 已生成" if ok else "HTTPS 自签证书: 生成失败，请安装 openssl 或切换 HTTP")
 
 
@@ -179,7 +214,7 @@ def run_server() -> None:
     start_cloud_scheduler()
     listeners: list[tuple[str, int, Path | None, Path | None]] = []
     if cfg.get("https_enabled", True):
-        if not ensure_self_signed_cert("localhost"):
+        if not ensure_self_signed_cert():
             raise SystemExit("无法生成 HTTPS 证书，请安装 openssl 或关闭 HTTPS。")
         cert, key = cert_paths()
         listeners.append(("https", int(cfg["https_port"]), cert, key))
@@ -521,14 +556,21 @@ def generate_client_code(username: str | None = None) -> None:
     port = int(cfg["https_port"] if mode == "https" else cfg["http_port"])
     ca_cert = ""
     if mode == "https":
+        cert_changed = False
+        if host not in cert_hosts(cfg):
+            print(f"提示: 当前 HTTPS 证书地址列表中没有 {host}。")
+            if confirm("是否加入证书地址并重新生成证书", True):
+                cert_changed = add_cert_host(cfg, host)
+                if cert_changed:
+                    save_config(cfg)
         before = read_json(cert_meta_path(), {})
-        if not ensure_self_signed_cert(host):
+        if not ensure_self_signed_cert():
             print("无法为该地址生成 HTTPS 证书，请安装 openssl 或切换 HTTP 模式。")
             pause()
             return
         after = read_json(cert_meta_path(), {})
-        if before and before != after:
-            print("提示: HTTPS 证书已按新地址重新生成；如果接收服务正在运行，请重启服务。")
+        if cert_changed or (before and before != after):
+            restart_service_if_running("HTTPS 证书")
         cert, _ = cert_paths()
         if cert.exists():
             ca_cert = cert.read_text(encoding="utf-8")
@@ -551,6 +593,66 @@ def generate_client_code(username: str | None = None) -> None:
     pause()
 
 
+def cert_hosts_menu() -> None:
+    while True:
+        cfg = load_config()
+        print_header("Backuper Server - HTTPS 证书地址")
+        hosts = cert_hosts(cfg)
+        print("当前证书地址:")
+        for idx, host in enumerate(hosts, 1):
+            builtin = " (内置)" if host in ("localhost", "127.0.0.1") else ""
+            print(f"{idx}. {host}{builtin}")
+        print("")
+        print("1. 自动检测并加入服务器 IP")
+        print("2. 添加自定义域名")
+        print("3. 添加自定义 IP")
+        print("4. 删除自定义地址")
+        print("5. 重新生成证书")
+        print("0. 返回")
+        choice = prompt("请选择")
+        changed = False
+        if choice == "1":
+            host, source = detect_connect_host()
+            changed = add_cert_host(cfg, host)
+            print(f"检测到: {host} ({source})")
+            if not changed:
+                print("该地址已存在或无需加入。")
+        elif choice == "2":
+            changed = add_cert_host(cfg, prompt("域名，例如 backup.example.com"))
+        elif choice == "3":
+            changed = add_cert_host(cfg, prompt("IP 地址"))
+        elif choice == "4":
+            custom = [host for host in cert_hosts(cfg) if host not in ("localhost", "127.0.0.1")]
+            if not custom:
+                print("暂无自定义地址。")
+                pause()
+                continue
+            for idx, host in enumerate(custom, 1):
+                print(f"{idx}. {host}")
+            target = prompt("请选择要删除的序号")
+            try:
+                idx = int(target) - 1
+            except ValueError:
+                idx = -1
+            if 0 <= idx < len(custom):
+                cfg["cert_hosts"] = [host for host in cfg.get("cert_hosts", []) if normalize_host(str(host)) != custom[idx]]
+                changed = True
+        elif choice == "5":
+            changed = True
+        elif choice == "0":
+            return
+        if changed:
+            save_config(cfg)
+            cert, key = cert_paths()
+            cert.unlink(missing_ok=True)
+            key.unlink(missing_ok=True)
+            if ensure_self_signed_cert():
+                restart_service_if_running("HTTPS 证书")
+            else:
+                print("HTTPS 证书生成失败，请确认 openssl 可用。")
+            pause()
+
+
 def settings_menu() -> None:
     cfg = load_config()
     before_listener = (
@@ -567,6 +669,7 @@ def settings_menu() -> None:
     print(f"5. 修改 HTTPS 端口: {cfg['https_port']}")
     print(f"6. 修改客户端下载权限: {'允许' if cfg.get('allow_download', False) else '禁止'}")
     print(f"7. 修改普通请求访问限制: {'仅允许 Backuper 客户端' if cfg.get('require_program_access', True) else '允许普通 WebDAV 请求'}")
+    print("8. HTTPS 证书域名/IP 设置")
     print("0. 返回")
     choice = prompt("请选择")
     if choice == "1":
@@ -584,6 +687,9 @@ def settings_menu() -> None:
         cfg["allow_download"] = confirm("是否允许客户端下载文件内容", bool(cfg.get("allow_download", False)))
     elif choice == "7":
         cfg["require_program_access"] = confirm("是否要求 Backuper 程序访问令牌", bool(cfg.get("require_program_access", True)))
+    elif choice == "8":
+        cert_hosts_menu()
+        return
     if not cfg.get("http_enabled", False) and not cfg.get("https_enabled", True):
         print("HTTP 和 HTTPS 不能同时关闭，已重新启用 HTTPS。")
         cfg["https_enabled"] = True

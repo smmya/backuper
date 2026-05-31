@@ -133,12 +133,19 @@ def select_server(cfg: dict) -> tuple[int, dict] | tuple[None, None]:
 def import_server_code() -> None:
     code = prompt("请粘贴服务端配置码")
     try:
-        payload = decode_code(code)
+        server = server_from_code(code)
     except Exception as exc:
         print(f"解析失败: {exc}")
         pause()
         return
-    server = {
+    cfg = load_config()
+    server["name"] = prompt("本地连接名称", make_server_name(server, cfg))
+    edit_server_config(server, "Backuper Client - 导入服务器配置", None)
+
+
+def server_from_code(code: str) -> dict:
+    payload = decode_code(code)
+    return {
         "protocol": payload.get("protocol", "webdav"),
         "mode": payload.get("mode", "https"),
         "host": payload.get("host", ""),
@@ -150,9 +157,26 @@ def import_server_code() -> None:
         "program_access_token": payload.get("program_access_token", ""),
         "tls": payload.get("tls", {}),
     }
-    cfg = load_config()
-    server["name"] = prompt("本地连接名称", make_server_name(server, cfg))
-    edit_server_config(server, "Backuper Client - 导入服务器配置", None)
+
+
+def refresh_server_from_code(idx: int, current: dict) -> None:
+    code = prompt("请粘贴新的服务端配置码")
+    try:
+        incoming = server_from_code(code)
+    except Exception as exc:
+        print(f"解析失败: {exc}")
+        pause()
+        return
+    incoming["name"] = current.get("name") or incoming.get("name")
+    print_header("Backuper Client - 刷新服务器配置")
+    print("当前配置:")
+    show_server_config_inline(current)
+    print("")
+    print("配置码内容:")
+    show_server_config_inline(incoming)
+    print("")
+    if confirm("是否用配置码刷新该服务器连接", True):
+        edit_server_config(incoming, "Backuper Client - 刷新服务器配置", idx)
 
 
 def save_server_config(server: dict, idx: int | None = None) -> None:
@@ -278,6 +302,11 @@ def manual_server_config() -> None:
 
 
 def show_server_config(server: dict) -> None:
+    show_server_config_inline(server)
+    pause()
+
+
+def show_server_config_inline(server: dict) -> None:
     print(f"连接名称: {server.get('name') or '-'}")
     print(f"服务器名称: {server.get('server_name') or '-'}")
     print(f"协议: {server.get('protocol', 'webdav')}")
@@ -290,7 +319,6 @@ def show_server_config(server: dict) -> None:
     print(f"程序访问令牌: {'已配置' if server.get('program_access_token') else '未配置'}")
     print(f"TLS 校验: {'启用' if server.get('tls', {}).get('verify', True) else '关闭'}")
     print(f"CA 证书: {'已配置' if server.get('tls', {}).get('ca_cert') else '未配置'}")
-    pause()
 
 
 def manage_existing_server() -> None:
@@ -309,7 +337,8 @@ def manage_existing_server() -> None:
         print("1. 修改配置")
         print("2. 查看配置")
         print("3. 测试连接")
-        print("4. 删除连接")
+        print("4. 通过配置码刷新证书/参数")
+        print("5. 删除连接")
         print("0. 返回")
         choice = prompt("请选择")
         if choice == "1":
@@ -320,6 +349,8 @@ def manage_existing_server() -> None:
             test_server(server)
             pause()
         elif choice == "4":
+            refresh_server_from_code(idx, dict(server))
+        elif choice == "5":
             if any(job.get("server") == server.get("name") for job in cfg.get("jobs", [])):
                 print("该服务器仍被任务使用，不能删除。")
                 pause()
