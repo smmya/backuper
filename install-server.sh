@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="${BACKUPER_REPO_URL:-}"
+REPO_URL="${BACKUPER_REPO_URL:-https://github.com/smmya/backuper.git}"
 BRANCH="${BACKUPER_BRANCH:-main}"
 INSTALL_BASE_DIR="${BACKUPER_BASE_DIR:-$(pwd)}"
 INSTALL_DIR="${BACKUPER_INSTALL_DIR:-$INSTALL_BASE_DIR/backuper}"
@@ -74,10 +74,6 @@ resolve_source() {
     log "使用脚本同目录程序: $SCRIPT_DIR"
     printf '%s\n' "$SCRIPT_DIR"
     return
-  fi
-
-  if [ -z "$REPO_URL" ]; then
-    die "未在脚本同目录找到程序文件，请在仓库目录执行该脚本，或设置 BACKUPER_REPO_URL"
   fi
 
   local tmpdir
