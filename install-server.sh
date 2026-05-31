@@ -2,15 +2,17 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="${BACKUPER_REPO_URL:-https://github.com/smmya/backuper.git}"
-BRANCH="${BACKUPER_BRANCH:-main}"
-INSTALL_BASE_DIR="${BACKUPER_BASE_DIR:-$(pwd)}"
-REQUESTED_INSTALL_DIR="${BACKUPER_INSTALL_DIR:-}"
+MODE=""
+REPO_URL="https://github.com/smmya/backuper.git"
+BRANCH="main"
+INSTALL_BASE_DIR="$(pwd)"
 INSTALL_DIR=""
 INSTALL_RECORD="/etc/backuper/install.conf"
-SERVICE_NAME="${BACKUPER_SERVICE_NAME:-backuper-server.service}"
-AUTO_START="${BACKUPER_AUTO_START:-0}"
-INSTALL_RCLONE="${BACKUPER_INSTALL_RCLONE:-1}"
+SERVICE_NAME="backuper-server.service"
+CLIENT_SERVICE_NAME="backuper-client.service"
+AUTO_START="0"
+INSTALL_RCLONE="1"
+REMOVE_DATA="0"
 
 log() {
   printf '\n[Backuper] %s\n' "$*" >&2
@@ -23,13 +25,47 @@ die() {
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    die "请使用 root 执行，或使用: sudo BACKUPER_REPO_URL=... bash install-server.sh"
+    die "请使用 root 执行，或使用: sudo bash install-server.sh"
   fi
+}
+
+choose_action() {
+  local choice
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    die "需要交互式终端读取数字选择"
+  fi
+  cat >/dev/tty <<EOF
+
+Backuper 一键脚本
+================
+1. 安装/更新程序
+2. 安装/更新程序并启动服务端
+3. 卸载程序，保留配置和备份数据
+4. 卸载程序，并删除配置和备份数据
+0. 退出
+
+EOF
+  printf '请选择: ' >/dev/tty
+  if ! IFS= read -r choice </dev/tty; then
+    die "无法读取输入，请在交互式终端中执行脚本"
+  fi
+  case "$choice" in
+    1) MODE="install"; AUTO_START="0" ;;
+    2) MODE="install"; AUTO_START="1" ;;
+    3) MODE="uninstall"; REMOVE_DATA="0" ;;
+    4) MODE="uninstall"; REMOVE_DATA="1" ;;
+    0) exit 0 ;;
+    *) die "无效选择: $choice" ;;
+  esac
 }
 
 is_install_dir() {
   local candidate="${1:-}"
-  [ -n "$candidate" ] && [ -d "$candidate/backuper" ] && [ -f "$candidate/server" ] && [ -f "$candidate/client" ]
+  [ -n "$candidate" ] && [ -d "$candidate" ] && {
+    { [ -d "$candidate/backuper" ] && [ -f "$candidate/server" ] && [ -f "$candidate/client" ]; } ||
+    [ -d "$candidate/var" ] ||
+    [ -d "$candidate/storage" ]
+  }
 }
 
 set_install_dir_if_valid() {
@@ -42,12 +78,6 @@ set_install_dir_if_valid() {
 }
 
 detect_install_dir() {
-  if [ -n "$REQUESTED_INSTALL_DIR" ]; then
-    INSTALL_DIR="$REQUESTED_INSTALL_DIR"
-    log "使用指定安装目录: $INSTALL_DIR"
-    return
-  fi
-
   local recorded unit_dir launcher_dir candidate
   if [ -f "$INSTALL_RECORD" ]; then
     recorded="$(sed -n 's/^INSTALL_DIR=//p' "$INSTALL_RECORD" | head -n 1)"
@@ -80,6 +110,10 @@ detect_install_dir() {
     fi
   done
 
+  if [ "$MODE" = "uninstall" ]; then
+    die "未检测到已有安装目录；请先确认 /etc/backuper/install.conf、systemd 服务或快捷命令是否存在"
+  fi
+
   INSTALL_DIR="$INSTALL_BASE_DIR/backuper"
   log "未检测到已有安装，使用新安装目录: $INSTALL_DIR"
 }
@@ -87,7 +121,7 @@ detect_install_dir() {
 validate_install_dir() {
   case "$INSTALL_DIR" in
     /*) ;;
-    *) die "BACKUPER_INSTALL_DIR 必须是绝对路径" ;;
+    *) die "安装目录必须是绝对路径" ;;
   esac
   case "$INSTALL_DIR" in
     /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
@@ -225,6 +259,60 @@ start_service() {
   fi
 }
 
+uninstall_services() {
+  log "停止并删除 systemd 服务"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl disable --now "$CLIENT_SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$SERVICE_NAME" "/etc/systemd/system/$CLIENT_SERVICE_NAME"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE_NAME" "$CLIENT_SERVICE_NAME" >/dev/null 2>&1 || true
+  else
+    rm -f "/etc/systemd/system/$SERVICE_NAME" "/etc/systemd/system/$CLIENT_SERVICE_NAME"
+  fi
+}
+
+uninstall_launchers() {
+  log "删除快捷命令"
+  rm -f /usr/local/bin/backuper-server /usr/local/bin/backuper-client
+}
+
+uninstall_files() {
+  if [ "$REMOVE_DATA" = "1" ]; then
+    log "删除完整安装目录，包括配置和备份数据: $INSTALL_DIR"
+    rm -rf "$INSTALL_DIR"
+    return
+  fi
+
+  log "删除程序文件，保留 var/ 和 storage/: $INSTALL_DIR"
+  rm -rf "$INSTALL_DIR/backuper"
+  rm -f "$INSTALL_DIR/server" "$INSTALL_DIR/client" "$INSTALL_DIR/README.md" "$INSTALL_DIR/install-server.sh"
+}
+
+uninstall_record() {
+  if [ "$REMOVE_DATA" = "1" ]; then
+    log "删除安装记录"
+    rm -f "$INSTALL_RECORD"
+    rmdir "$(dirname "$INSTALL_RECORD")" >/dev/null 2>&1 || true
+  else
+    log "保留安装记录，便于后续重新安装到原目录"
+  fi
+}
+
+print_uninstall_done() {
+  cat <<EOF
+
+[Backuper] 卸载完成
+
+安装目录:
+  $INSTALL_DIR
+
+数据处理:
+  $([ "$REMOVE_DATA" = "1" ] && printf '已删除完整安装目录' || printf '已保留 var/ 和 storage/')
+
+EOF
+}
+
 print_done() {
   cat <<EOF
 
@@ -250,8 +338,19 @@ EOF
 
 main() {
   need_root
+  choose_action
   detect_install_dir
   validate_install_dir
+
+  if [ "$MODE" = "uninstall" ]; then
+    uninstall_services
+    uninstall_launchers
+    uninstall_files
+    uninstall_record
+    print_uninstall_done
+    return
+  fi
+
   install_packages
   check_python
   local src
