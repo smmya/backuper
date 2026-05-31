@@ -80,6 +80,12 @@ def load_config() -> dict:
     data = read_json(SERVER_CONFIG, {})
     cfg.update(data)
     changed = False
+    if "cert_hosts" not in data:
+        cfg["cert_hosts"] = ["localhost", "127.0.0.1"]
+        host, _ = detect_connect_host()
+        if host not in cfg["cert_hosts"]:
+            cfg["cert_hosts"].append(host)
+        changed = True
     if not data.get("program_access_token"):
         cfg["program_access_token"] = random_secret()
         changed = True
@@ -132,7 +138,7 @@ def normalize_host(value: str) -> str:
 
 
 def cert_hosts(cfg: dict, extra: str | None = None) -> list[str]:
-    hosts: list[str] = ["localhost", "127.0.0.1"]
+    hosts: list[str] = []
     for item in cfg.get("cert_hosts", []):
         host = normalize_host(str(item))
         if host and host not in hosts:
@@ -146,10 +152,10 @@ def cert_hosts(cfg: dict, extra: str | None = None) -> list[str]:
 
 def add_cert_host(cfg: dict, host: str) -> bool:
     host = normalize_host(host)
-    if not host or host in ("localhost", "127.0.0.1"):
+    if not host:
         return False
     items = [normalize_host(str(item)) for item in cfg.get("cert_hosts", [])]
-    items = [item for item in items if item and item not in ("localhost", "127.0.0.1")]
+    items = [item for item in items if item]
     if host in items:
         return False
     items.append(host)
@@ -160,6 +166,9 @@ def add_cert_host(cfg: dict, host: str) -> bool:
 def ensure_self_signed_cert(host: str | None = None) -> bool:
     cert, key = cert_paths()
     requested_hosts = cert_hosts(load_config(), host)
+    if not requested_hosts:
+        detected_host, _ = detect_connect_host()
+        requested_hosts = [detected_host]
     meta = read_json(cert_meta_path(), {})
     existing_hosts = set(meta.get("hosts", []))
     if cert.exists() and key.exists() and set(requested_hosts).issubset(existing_hosts):
@@ -599,9 +608,11 @@ def cert_hosts_menu() -> None:
         print_header("Backuper Server - HTTPS 证书地址")
         hosts = cert_hosts(cfg)
         print("当前证书地址:")
-        for idx, host in enumerate(hosts, 1):
-            builtin = " (内置)" if host in ("localhost", "127.0.0.1") else ""
-            print(f"{idx}. {host}{builtin}")
+        if hosts:
+            for idx, host in enumerate(hosts, 1):
+                print(f"{idx}. {host}")
+        else:
+            print("暂无")
         print("")
         print("1. 自动检测并加入服务器 IP")
         print("2. 添加自定义域名")
@@ -622,20 +633,20 @@ def cert_hosts_menu() -> None:
         elif choice == "3":
             changed = add_cert_host(cfg, prompt("IP 地址"))
         elif choice == "4":
-            custom = [host for host in cert_hosts(cfg) if host not in ("localhost", "127.0.0.1")]
-            if not custom:
-                print("暂无自定义地址。")
+            current = cert_hosts(cfg)
+            if not current:
+                print("暂无证书地址。")
                 pause()
                 continue
-            for idx, host in enumerate(custom, 1):
+            for idx, host in enumerate(current, 1):
                 print(f"{idx}. {host}")
             target = prompt("请选择要删除的序号")
             try:
                 idx = int(target) - 1
             except ValueError:
                 idx = -1
-            if 0 <= idx < len(custom):
-                cfg["cert_hosts"] = [host for host in cfg.get("cert_hosts", []) if normalize_host(str(host)) != custom[idx]]
+            if 0 <= idx < len(current):
+                cfg["cert_hosts"] = [host for host in cfg.get("cert_hosts", []) if normalize_host(str(host)) != current[idx]]
                 changed = True
         elif choice == "5":
             changed = True
