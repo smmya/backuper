@@ -238,6 +238,21 @@ def systemctl(action: str) -> None:
         print("systemctl 执行失败；如果尚未安装服务，请先选择“生成开机自启配置”。")
 
 
+def restart_service_if_running(reason: str) -> None:
+    status = systemd_service_status(service_name())
+    if not status.get("available"):
+        print(f"{reason}已保存；当前系统不可读取 systemd 状态，请按需手动重启服务端。")
+        return
+    if status.get("active") != "active":
+        print(f"{reason}已保存；后台服务当前未运行，无需自动重启。")
+        return
+    proc = subprocess.run(privileged_args(["systemctl", "restart", service_name()]))
+    if proc.returncode == 0:
+        print(f"{reason}已保存，服务端后台服务已自动重启。")
+    else:
+        print(f"{reason}已保存，但自动重启失败，请手动重启服务端。")
+
+
 def privileged_args(args: list[str]) -> list[str]:
     if os.name == "nt":
         return args
@@ -538,6 +553,12 @@ def generate_client_code(username: str | None = None) -> None:
 
 def settings_menu() -> None:
     cfg = load_config()
+    before_listener = (
+        bool(cfg.get("http_enabled", False)),
+        int(cfg.get("http_port", 8080)),
+        bool(cfg.get("https_enabled", True)),
+        int(cfg.get("https_port", 8443)),
+    )
     print_header("Backuper Server - 基础设置")
     print(f"1. 修改数据根目录: {cfg['storage_root']}")
     print(f"2. 切换 HTTP 监听: {'启用' if cfg.get('http_enabled', False) else '关闭'}")
@@ -567,6 +588,14 @@ def settings_menu() -> None:
         print("HTTP 和 HTTPS 不能同时关闭，已重新启用 HTTPS。")
         cfg["https_enabled"] = True
     save_config(cfg)
+    after_listener = (
+        bool(cfg.get("http_enabled", False)),
+        int(cfg.get("http_port", 8080)),
+        bool(cfg.get("https_enabled", True)),
+        int(cfg.get("https_port", 8443)),
+    )
+    if choice in {"2", "3", "4", "5"} and before_listener != after_listener:
+        restart_service_if_running("监听端口配置")
 
 
 def usage() -> None:
