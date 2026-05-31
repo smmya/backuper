@@ -203,19 +203,23 @@ def ensure_self_signed_cert(host: str | None = None) -> bool:
         return False
 
 
-def init_server() -> None:
+def init_server(restart: bool = False) -> None:
     cfg = ensure_initialized()
+    before_meta = read_json(cert_meta_path(), {})
     host, source = detect_connect_host()
     changed = add_cert_host(cfg, host)
     if changed:
         save_config(cfg)
     ok = ensure_self_signed_cert()
+    after_meta = read_json(cert_meta_path(), {})
     print("初始化完成。")
     print(f"配置文件: {SERVER_CONFIG}")
     print(f"数据根目录: {cfg['storage_root']}")
     print(f"证书地址: {', '.join(cert_hosts(cfg))}")
     print(f"自动检测地址: {host} ({source})")
     print("HTTPS 自签证书: 已生成" if ok else "HTTPS 自签证书: 生成失败，请安装 openssl 或切换 HTTP")
+    if restart and (changed or before_meta != after_meta):
+        restart_service_if_running("初始化/修复配置")
 
 
 def run_server() -> None:
@@ -998,7 +1002,7 @@ def interactive() -> None:
         print("0. 退出")
         choice = prompt("请选择")
         if choice == "1":
-            init_server()
+            init_server(restart=True)
             pause()
         elif choice == "2":
             foreground_run_server()
